@@ -179,8 +179,8 @@ open class StructBinding(def_:StructDef<*>, val buffer: ByteBuffer, val structOf
 			is StructBinding -> what.toRawString()
 			is Iterable<*> -> what.joinToString(separator=" ",prefix="[",postfix="]") { toRawString(it) }
 			is Sequence<*> -> what.joinToString(separator=" ",prefix="[",postfix="]") { toRawString(it) }
+			is ByteArray -> if (what.size==0) "[]" else "["+BigInteger(1,what).toString(16)+"]"
 			is Array<*> -> what.joinToString(separator=" ",prefix="[",postfix="]") { toRawString(it) }
-			is ByteArray -> BigInteger(1,what).toString(16)
 			else -> what.toString()
 		}
 	}
@@ -193,7 +193,13 @@ open class StructBinding(def_:StructDef<*>, val buffer: ByteBuffer, val structOf
 
 	override fun toString(): String {
 		return def.members.joinToString { md ->
-			md.getValue(this).toString()
+			md.getValue(this).let {
+				when (it) {
+					is ByteArray -> toRawString(it)
+					is Array<*> -> "["+Arrays.toString(it)+"]"
+					else -> it.toString()
+				}
+			}
 		}
 	}
 
@@ -646,6 +652,29 @@ abstract class StructDef<out BINDING : StructBinding> {
 			val n = countFn(thisRef)
 			writeBytes(thisRef.buffer, pos.start(thisRef), n*8, value.copyOf(n))
 		}
+	}
+	/*
+	 Sample use case: if bit is set, fixed-size array, else nothing
+
+	 MyStructDef:
+	 val flag_def = BitMember()
+	 val array = VarByteArrayMember<MyStruct> { if (it.flag) 10 else 0 }
+
+	 MyStruct:
+	 var flag: Boolean by flag_def
+	 var array: ByteArray by array_def
+	 */
+	inline fun<reified T:StructBinding> VarByteArrayMember(crossinline countFn:(T)->Int) = VarByteArrayMember { countFn(it as T) }
+
+	inner class FixedByteArrayMember(val count: Int):FixedSizeMember<ByteArray>(count*8),ReadWriteProperty<StructBinding, ByteArray> {
+		override fun getValue(binding: StructBinding): ByteArray {
+			return readBytes(binding.buffer, pos.start(binding), count*8)
+		}
+
+		override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: ByteArray) {
+			writeBytes(thisRef.buffer, pos.start(thisRef), count*8, value.copyOf(count))
+		}
+
 	}
 
 	inner class FixedStringMember(val count: Int, val charset: Charset = Charsets.UTF_8):FixedSizeMember<String>(count*8),ReadWriteProperty<StructBinding, String> {
