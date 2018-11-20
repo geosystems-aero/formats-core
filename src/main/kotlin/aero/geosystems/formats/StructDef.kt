@@ -216,6 +216,9 @@ internal inline fun align(pos: Int, alignment: Int): Int {
 	return if (alignment == 0 || pos % alignment == 0) pos else ((pos / alignment) + 1) * alignment
 }
 
+fun Int.reverseAsUInt16() = java.lang.Short.reverseBytes(toShort()).toInt().and(0xffff)
+fun Long.reverseAsUInt32() = java.lang.Integer.reverseBytes(toInt()).toLong().and(0xffff_ffffL)
+
 abstract class StructDef<out BINDING : StructBinding> {
 	internal var ref_count = 0
 	abstract inner class BitRef(
@@ -356,7 +359,7 @@ abstract class StructDef<out BINDING : StructBinding> {
 	abstract inner class NumberMember<T>(bitSize: Int) : FixedSizeMember<T>(bitSize), MemberWithToRawString {
 		val maxSigned = 1L.shl(bitSize - 1) - 1
 		val maxUnsigned = 1L.shl(bitSize) - 1
-		val minSigned = -1L.shl(bitSize - 1)
+		val minSigned = (-1L).shl(bitSize - 1)
 
 		fun getUnsigned(binding: StructBinding): Long {
 			return readBits(binding.buffer, pos.start(binding), bitSize).and(maxUnsigned)
@@ -373,6 +376,51 @@ abstract class StructDef<out BINDING : StructBinding> {
 		override fun toRawString(binding: StructBinding): String {
 			return getUnsigned(binding).toString()
 		}
+	}
+
+	inner class UInt16LittleEndianMember():FixedSizeMember<Int>(16), MemberWithToRawString, ReadWriteProperty<StructBinding,Int> {
+		override fun getValue(binding: StructBinding): Int {
+			return readBits(binding.buffer, pos.start(binding), bitSize).toInt().reverseAsUInt16()
+		}
+
+		override fun toRawString(binding: StructBinding): String {
+			return getValue(binding).toString()
+		}
+
+		override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: Int) {
+			writeBits(thisRef.buffer, value.reverseAsUInt16().toLong(), pos.start(thisRef), bitSize)
+		}
+
+		fun bitSubfield(lowestBit:Int,highestBit:Int) = object:ReadWriteProperty<StructBinding,Int> {
+			val subBitSize = highestBit - lowestBit + 1
+			val mask1 = (1.shl(subBitSize)-1).shl(lowestBit)
+			val mask0 = mask1.inv()
+
+			override fun getValue(thisRef: StructBinding, property: KProperty<*>): Int {
+				val b = this@UInt16LittleEndianMember.getValue(thisRef, property)
+				return b.and(mask1).ushr(lowestBit)
+			}
+
+			override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: Int) {
+				var b = this@UInt16LittleEndianMember.getValue(thisRef, property)
+				b = b.and(mask0).or(value.shl(lowestBit).and(mask1))
+				this@UInt16LittleEndianMember.setValue(thisRef, property, b)
+			}
+		}
+	}
+	inner class UInt32LittleEndianMember():FixedSizeMember<Long>(32), MemberWithToRawString, ReadWriteProperty<StructBinding,Long> {
+		override fun getValue(binding: StructBinding): Long {
+			return readBits(binding.buffer, pos.start(binding), bitSize).reverseAsUInt32()
+		}
+
+		override fun toRawString(binding: StructBinding): String {
+			return getValue(binding).toString()
+		}
+
+		override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: Long) {
+			writeBits(thisRef.buffer, value.reverseAsUInt32(), pos.start(thisRef), bitSize)
+		}
+
 	}
 
 	inner class LongMember(bitSize: Int) : NumberMember<Long>(bitSize), ReadWriteProperty<StructBinding, Long> {
