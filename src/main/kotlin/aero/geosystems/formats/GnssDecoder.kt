@@ -6,6 +6,9 @@ import aero.geosystems.formats.utils.put
 import aero.geosystems.formats.utils.subByteBuffer
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.logging.Level
+import java.util.logging.LogManager
+import java.util.logging.Logger
 
 /**
  * Created by aimozg on 05.04.2016.
@@ -41,7 +44,7 @@ abstract class GnssDataConsumer<in T> : IGnssDataConsumer<T> {
 			IGnssDataConsumer.TYPE_GARBAGE ->
 					handleGarbage(buffer)
 			IGnssDataConsumer.TYPE_EPHEMERIS ->
-					if (message != null && timestamp != null) handleEphemeris(message,buffer,timestamp)
+				if (message != null) handleEphemeris(message, buffer, timestamp)
 					else handleOther(message,buffer,timestamp,type)
 			IGnssDataConsumer.TYPE_OBSERVATIONS ->
 				if (message != null && timestamp != null) handleObservations(message,buffer,timestamp)
@@ -54,7 +57,7 @@ abstract class GnssDataConsumer<in T> : IGnssDataConsumer<T> {
 
 	open fun handleGarbage(buffer: ByteBuffer) { }
 
-	open fun handleEphemeris(message: T, buffer: ByteBuffer, timestamp: Long) { }
+	open fun handleEphemeris(message: T, buffer: ByteBuffer, timestamp: Long?) {}
 
 	open fun handleObservations(message: T, buffer: ByteBuffer, timestamp: Long) { }
 
@@ -72,6 +75,8 @@ abstract class AbstractGnssDecoder<T>(
 		val syncLength: Int,
 		sink: IGnssDataConsumer<T> = NopGnssConsumer
 ) : GnssDecoder<T>(sink) {
+	protected open val logger: Logger? = LogManager.getLogManager().getLogger("aero.geosystems.formats.GnssDecoder")
+
 	open val byteOrder: ByteOrder get() = ByteOrder.LITTLE_ENDIAN
 	var currentOffset: Long = 0L
 
@@ -94,6 +99,7 @@ abstract class AbstractGnssDecoder<T>(
 		}
 	}
 	open protected fun resetHeader() {
+		if (logger?.isLoggable(Level.FINEST) == true) logger?.finest("SYNC 0")
 		headerBuffer.position(0)
 	}
 
@@ -119,6 +125,7 @@ abstract class AbstractGnssDecoder<T>(
 						resetHeader()
 					} else {
 						headerBuffer.put(b)
+						if (logger?.isLoggable(Level.FINEST) == true) logger?.finest("SYNC " + headerBuffer.position())
 					}
 				}
 				// MINIMAL HEADER
@@ -134,6 +141,7 @@ abstract class AbstractGnssDecoder<T>(
 						headerBuffer.put(data, n)
 						if (!headerBuffer.hasRemaining()) {
 							if (checkMinimalHeader()) {
+								if (logger?.isLoggable(Level.FINEST) == true) logger?.finest("MINIMAL HEADER")
 								messageBuffer = allocateMessageBuffer()
 								headerBuffer.rewind()
 								messageBuffer.put(headerBuffer)
@@ -155,6 +163,7 @@ abstract class AbstractGnssDecoder<T>(
 			if (!headerBuffer.hasRemaining() && !messageBuffer.hasRemaining()) {
 				messageBuffer.flip()
 				if (crcGood()) {
+					if (logger?.isLoggable(Level.FINEST) == true) logger?.finest("CRC OK")
 					resetHeader()
 					try {
 						completeAndConsumeMessage()
@@ -169,6 +178,7 @@ abstract class AbstractGnssDecoder<T>(
 						gpos = 0
 					}
 				} else {
+					if (logger?.isLoggable(Level.FINEST) == true) logger?.finest("CRC FAIL")
 					glen += syncLength
 					sink.consumeGarbage(messageBuffer.subByteBuffer(gpos,glen))
 					glen = 0
