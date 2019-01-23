@@ -11,8 +11,7 @@ buildscript {
 }
 
 plugins {
-    val kotlinVersion = "1.3.11"
-    kotlin("jvm") version kotlinVersion
+    kotlin("jvm")
 }
 
 repositories {
