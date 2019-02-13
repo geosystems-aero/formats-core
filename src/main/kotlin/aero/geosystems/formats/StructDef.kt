@@ -152,10 +152,17 @@ fun writeBits(buffer: ByteBuffer, value: Long, offset: Int, count: Int) {
 
 open class StructBinding(def_:StructDef<*>, val buffer: ByteBuffer, val structOffset: Int) {
 	protected open val def:StructDef<*> = def_
+	fun definition() = def
 	internal val cached_sizes = arrayOfNulls<Int?>(def_.ref_count+1)
 	internal val cached_starts = arrayOfNulls<Int?>(def_.ref_count+1)
 	internal val cached_ends = arrayOfNulls<Int?>(def_.ref_count+1)
 	fun bufferCopy():ByteBuffer = ByteBuffer.wrap(buffer.copyToArray())
+	fun bitSize() = def.bitSize(this)
+	fun byteSize() = def.byteSize(this)
+	fun isMalformed(): Boolean {
+		val bitSize = bitSize()
+		return (structOffset+ bitSize +7)/8 > buffer.limit()
+	}
 	companion object {
 		fun <T> errAccessor(): ReadWriteProperty<Any, T> = object : ReadWriteProperty<Any, T> {
 			override operator fun getValue(thisRef: Any, property: KProperty<*>): T = error(this.javaClass)
@@ -191,15 +198,17 @@ open class StructBinding(def_:StructDef<*>, val buffer: ByteBuffer, val structOf
 		cached_ends.fill(null)
 	}
 
+	protected open fun memberToString(md:StructDef<*>.Member<*>) = md.getValue(this).let {
+		when (it) {
+			is ByteArray -> toRawString(it)
+			is Array<*> -> "["+Arrays.toString(it)+"]"
+			else -> it.toString()
+		}
+	}
+
 	override fun toString(): String {
 		return def.members.joinToString { md ->
-			md.getValue(this).let {
-				when (it) {
-					is ByteArray -> toRawString(it)
-					is Array<*> -> "["+Arrays.toString(it)+"]"
-					else -> it.toString()
-				}
-			}
+			memberToString(md)
 		}
 	}
 
@@ -224,6 +233,7 @@ internal inline fun align(pos: Int, alignment: Int): Int {
 
 fun Int.reverseAsUInt16() = java.lang.Short.reverseBytes(toShort()).toInt().and(0xffff)
 fun Long.reverseAsUInt32() = java.lang.Integer.reverseBytes(toInt()).toLong().and(0xffff_ffffL)
+fun Long.reverseAsInt64() = java.lang.Long.reverseBytes(this)
 
 abstract class StructDef<out BINDING : StructBinding> {
 	internal var ref_count = 0
@@ -318,7 +328,18 @@ abstract class StructDef<out BINDING : StructBinding> {
 	abstract inner class Member<T> : ReadOnlyProperty<StructBinding,T> {
 		val mAlignment = this@StructDef.gAlignment
 		abstract val pos: BitRef
-		protected val index by lazy { this@StructDef.members.indexOf(this) }
+		/*
+		private var knownIndex: Int
+		private var knownFrontCount: Int
+		protected val index:Int
+			get() {
+				if (knownFrontCount == -1) return knownIndex
+				if (knownFrontCount == frontMembers.size) return knownIndex
+				knownFrontCount = frontMembers.size
+				knownIndex = members.indexOf(this)
+				return knownIndex
+			}
+		*/
 		val prev: Member<*>? =
 				if (tailMode) tailMembers.firstOrNull() ?: tailMarker
 				else frontMembers.lastOrNull()
@@ -333,8 +354,16 @@ abstract class StructDef<out BINDING : StructBinding> {
 
 		init {
 			@Suppress("LeakingThis")
-			if (tailMode) tailMembers.add(this)
-			else frontMembers.add(this)
+			if (tailMode) {
+				tailMembers.add(this)
+//				knownFrontCount = frontMembers.size
+			} else {
+				frontMembers.add(this)
+//				knownFrontCount = -1
+			}
+			/*
+			knownIndex = members.indexOf(this)
+			*/
 		}
 	}
 	interface MemberWithToRawString {
@@ -364,10 +393,10 @@ abstract class StructDef<out BINDING : StructBinding> {
 
 	abstract inner class NumberMember<T>(bitSize: Int) : FixedSizeMember<T>(bitSize), MemberWithToRawString {
 		val maxSigned = 1L.shl(bitSize - 1) - 1
-		val maxUnsigned = 1L.shl(bitSize) - 1
+		val maxUnsigned = if (bitSize == 64) -1 else (1L.shl(bitSize) - 1)
 		val minSigned = (-1L).shl(bitSize - 1)
 
-		fun getUnsigned(binding: StructBinding): Long {
+		open fun getUnsigned(binding: StructBinding): Long {
 			return readBits(binding.buffer, pos.start(binding), bitSize).and(maxUnsigned)
 		}
 
@@ -375,7 +404,7 @@ abstract class StructDef<out BINDING : StructBinding> {
 			return toSigned(getUnsigned(binding), bitSize)
 		}
 
-		fun setValue(i: Long, binding: StructBinding) {
+		open fun setValue(i: Long, binding: StructBinding) {
 			writeBits(binding.buffer, i, pos.start(binding), bitSize)
 		}
 
@@ -384,17 +413,40 @@ abstract class StructDef<out BINDING : StructBinding> {
 		}
 	}
 
-	inner class UInt16LittleEndianMember():FixedSizeMember<Int>(16), MemberWithToRawString, ReadWriteProperty<StructBinding,Int> {
-		override fun getValue(binding: StructBinding): Int {
-			return readBits(binding.buffer, pos.start(binding), bitSize).toInt().reverseAsUInt16()
+	abstract inner class LittleEndianNumberMember<T>(bitSize:Int):NumberMember<T>(bitSize) {
+		init {
+			if (bitSize != 8 && bitSize != 16 && bitSize != 32 && bitSize != 64) error("Invalid bitSize $bitSize, must be 8/16/32/64")
+		}
+		override fun getUnsigned(binding: StructBinding): Long {
+			val x = super.getUnsigned(binding)
+			return when(bitSize) {
+				8 -> x
+				16 -> x.toInt().reverseAsUInt16().toLong().and(maxUnsigned)
+				32 -> x.reverseAsUInt32().and(maxUnsigned)
+				64 -> x.reverseAsInt64()
+				else -> error("Invalid bitSize")
+			}
 		}
 
-		override fun toRawString(binding: StructBinding): String {
-			return getValue(binding).toString()
+		override fun setValue(i: Long, binding: StructBinding) {
+			val x = when(bitSize) {
+				8 -> i
+				16 -> i.toInt().reverseAsUInt16().toLong().and(maxUnsigned)
+				32 -> i.reverseAsUInt32().and(maxUnsigned)
+				64 -> i.reverseAsInt64()
+				else -> error("Invalid bitSize")
+			}
+			super.setValue(x,binding)
+		}
+	}
+
+	inner class UInt16LittleEndianMember():LittleEndianNumberMember<Int>(16), ReadWriteProperty<StructBinding,Int> {
+		override fun getValue(binding: StructBinding): Int {
+			return getUnsigned(binding).toInt()
 		}
 
 		override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: Int) {
-			writeBits(thisRef.buffer, value.reverseAsUInt16().toLong(), pos.start(thisRef), bitSize)
+			setValue(value.toLong(),thisRef)
 		}
 
 		fun bitSubfield(lowestBit:Int,highestBit:Int) = object:ReadWriteProperty<StructBinding,Int> {
@@ -414,9 +466,32 @@ abstract class StructDef<out BINDING : StructBinding> {
 			}
 		}
 	}
-	inner class UInt32LittleEndianMember():FixedSizeMember<Long>(32), MemberWithToRawString, ReadWriteProperty<StructBinding,Long> {
+	inner class Int16LittleEndianMember():LittleEndianNumberMember<Int>(16), ReadWriteProperty<StructBinding,Int> {
+		override fun getValue(binding: StructBinding): Int {
+			return getSigned(binding).toInt()
+		}
+
+		override fun toRawString(binding: StructBinding): String {
+			return getValue(binding).toString()
+		}
+
+		override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: Int) {
+			setValue(value.toLong(),thisRef)
+		}
+	}
+	inner class UInt32LittleEndianMember():LittleEndianNumberMember<Long>(32), ReadWriteProperty<StructBinding,Long> {
 		override fun getValue(binding: StructBinding): Long {
-			return readBits(binding.buffer, pos.start(binding), bitSize).reverseAsUInt32()
+			return getUnsigned(binding)
+		}
+
+		override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: Long) {
+			setValue(value,thisRef)
+		}
+
+	}
+	inner class Int32LittleEndianMember():LittleEndianNumberMember<Long>(32), ReadWriteProperty<StructBinding,Long> {
+		override fun getValue(binding: StructBinding): Long {
+			return getSigned(binding)
 		}
 
 		override fun toRawString(binding: StructBinding): String {
@@ -424,7 +499,26 @@ abstract class StructDef<out BINDING : StructBinding> {
 		}
 
 		override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: Long) {
-			writeBits(thisRef.buffer, value.reverseAsUInt32(), pos.start(thisRef), bitSize)
+			setValue(value,thisRef)
+		}
+
+	}
+	inner class Float32LittleEndianMember():LittleEndianNumberMember<Float>(32), ReadWriteProperty<StructBinding,Float> {
+		override fun getValue(binding: StructBinding): Float {
+			return java.lang.Float.intBitsToFloat(getUnsigned(binding).toInt())
+		}
+
+		override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: Float) {
+			setValue(java.lang.Float.floatToIntBits(value).toLong(),thisRef)
+		}
+
+	}
+	inner class Float64LittleEndianMember():LittleEndianNumberMember<Double>(64), ReadWriteProperty<StructBinding,Double> {
+		override fun getValue(binding: StructBinding): Double {
+			return java.lang.Double.longBitsToDouble(getSigned(binding))
+		}
+		override fun setValue(thisRef: StructBinding, property: KProperty<*>, value: Double) {
+			setValue(java.lang.Double.doubleToLongBits(value),thisRef)
 		}
 
 	}
@@ -706,20 +800,35 @@ abstract class StructDef<out BINDING : StructBinding> {
 		}
 	}
 
-	internal inner class StructSizeRef(prev: BitRef?, val structDef: StructDef<*>, alignment: Int) : BitRef(prev, structDef.fixedSize(), alignment) {
+	internal inner class StructSizeRef(prev: BitRef?,
+	                                   val structMember: StructMember<*>,
+	                                   alignment: Int) : BitRef(prev, structMember.def.fixedSize(), alignment) {
 		override fun toString(): String {
-			return (fixedStart?.toString() ?: "?") + "+" + (structDef.fixedSize() ?: "?")
+			return (fixedStart?.toString() ?: "?") + "+" + (structMember.def.fixedSize() ?: "?")
 		}
 
-		override fun calcBitSize(binding: StructBinding): Int = structDef.bitSize(binding)
+		override fun calcBitSize(binding: StructBinding): Int {
+			val fixedSize1 = structMember.def.fixedSize()
+			if (fixedSize1 != null) return fixedSize1
+			else {
+				val substruct = structMember.getValue(binding)
+				return substruct.bitSize()
+			}
+		}
 	}
 
-	inner class StructMember<out STRUCT : StructBinding>(val def: StructDef<STRUCT>) : Member<STRUCT>() {
-		override val pos: BitRef = StructSizeRef(prev?.pos, def, mAlignment)
+	inner class StructMember<out STRUCT : StructBinding>(
+			val def: StructDef<STRUCT>,
+			val resetOffset: Boolean = false) : Member<STRUCT>() {
+		override val pos: BitRef = StructSizeRef(prev?.pos, this, mAlignment)
 		override fun getValue(binding: StructBinding): STRUCT {
 			val bb = binding.buffer
 			val bitStart = pos.start(binding)
-			return def.binding(bb.subByteBuffer(bitStart / 8), bitStart % 8)
+			return if (resetOffset) {
+				def.binding(bb.subByteBuffer(bitStart / 8), bitStart % 8)
+			} else {
+				def.binding(bb, bitStart)
+			}
 		}
 	}
 
@@ -734,16 +843,23 @@ abstract class StructDef<out BINDING : StructBinding> {
 		}
 	}
 
-	inner class StructArrayMember<out STRUCT : StructBinding>(val def: StructDef<STRUCT>, val count: NumberMember<*>) : Member<List<STRUCT>>() {
+	inner class StructArrayMember<out STRUCT : StructBinding>(
+			val def: StructDef<STRUCT>,
+			val count: NumberMember<*>,
+			val resetOffset: Boolean = false) : Member<List<STRUCT>>() {
 		override val pos: StructArraySizeRef = StructArraySizeRef(prev?.pos, def, count, mAlignment)
 		fun getItem(binding: StructBinding, index: Int): STRUCT {
 			val bb = binding.buffer
 			val bitStart = pos.start(binding) + pos.structSize * index
-			return def.binding(bb.subByteBuffer(bitStart / 8), bitStart % 8)
+			return if (resetOffset) {
+				def.binding(bb.subByteBuffer(bitStart / 8), bitStart % 8)
+			} else {
+				def.binding(bb, bitStart)
+			}
 		}
 
 		override fun getValue(binding: StructBinding): List<STRUCT> {
-			return (0..count.getUnsigned(binding) - 1).map { getItem(binding, it.toInt()) }
+			return (0 until count.getUnsigned(binding)).map { getItem(binding, it.toInt()) }
 		}
 	}
 

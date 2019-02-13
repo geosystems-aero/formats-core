@@ -15,10 +15,13 @@ inline fun minimum(a:Long, b:Long) = if (a < b) a else b
 fun ByteBuffer.subByteBuffer(pos:Int) = duplicate()!!.apply {
 	position(pos)
 }.slice()!!
-fun ByteBuffer.subByteBuffer(pos:Int, len:Int) = duplicate()!!.apply {
-	position(pos)
-	limit(pos + len)
-}.slice()!!
+fun ByteBuffer.subByteBuffer(pos:Int, len:Int): ByteBuffer {
+	if (pos + len > capacity()) error("pos=$pos, len=$len, cap=${capacity()}")
+	return duplicate()!!.apply {
+		position(pos)
+		limit(pos + len)
+	}.slice()!!
+}
 fun ByteBuffer.put(src: ByteBuffer, len:Int): ByteBuffer {
 	put(src.slice().limit(len) as ByteBuffer)
 	src.position(src.position()+len)

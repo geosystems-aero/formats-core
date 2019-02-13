@@ -109,9 +109,26 @@ abstract class AbstractGnssDecoder<T>(
 	abstract protected fun crcGood():Boolean
 	abstract protected fun completeAndConsumeMessage()
 
+	private var garbageBuffer = ByteBuffer.allocate(1024)
+	private fun flushGarbage() {
+		if (garbageBuffer.position()>0) {
+			sink.consumeGarbage(garbageBuffer.flipDuplicate())
+		}
+		garbageBuffer.position(0)
+	}
+	private fun garbage(bb:ByteBuffer) {
+		while (bb.remaining() > 0) {
+			garbageBuffer.put(bb,minOf(garbageBuffer.remaining(),bb.remaining()))
+			flushGarbage()
+		}
+	}
+	private fun garbage(byte:Byte) {
+		if (!garbageBuffer.hasRemaining()) {
+			flushGarbage()
+		}
+		garbageBuffer.put(byte)
+	}
 	override fun consume(data: ByteBuffer) {
-		var gpos = data.position()
-		var glen = 0
 		var pp = data.position()
 		val state0 = "data@$pp/${data.limit()}, HB=${headerBuffer.position()}/${headerBuffer.limit()}, MB=${messageBuffer.position()}/${messageBuffer.limit()}"
 		while(data.hasRemaining()) {
@@ -121,7 +138,8 @@ abstract class AbstractGnssDecoder<T>(
 					val b = data.get()
 					currentOffset++
 					if (syncByte(headerBuffer.position()) != b) {
-						glen++
+						if (headerBuffer.position() > 0) garbage(headerBuffer.flipDuplicate())
+						garbage(b)
 						resetHeader()
 					} else {
 						headerBuffer.put(b)
@@ -130,11 +148,6 @@ abstract class AbstractGnssDecoder<T>(
 				}
 				// MINIMAL HEADER
 				if (headerBuffer.position() >= syncLength && data.hasRemaining()) {
-					if (glen > 0) {
-						sink.consumeGarbage(data.subByteBuffer(gpos, glen))
-						glen = 0
-						gpos = 0
-					}
 					val n = minimum(headerBuffer.remaining(), data.remaining())
 					if (n > 0) {
 						currentOffset += n
@@ -146,7 +159,7 @@ abstract class AbstractGnssDecoder<T>(
 								headerBuffer.rewind()
 								messageBuffer.put(headerBuffer)
 							} else {
-								glen += headerBuffer.position()
+								if (headerBuffer.position() > 0) garbage(headerBuffer.flipDuplicate())
 								resetHeader()
 							}
 						}
@@ -168,21 +181,12 @@ abstract class AbstractGnssDecoder<T>(
 					try {
 						completeAndConsumeMessage()
 					} catch (e:Exception) {
-						glen += syncLength
-						sink.consumeGarbage(messageBuffer.subByteBuffer(gpos,glen))
+						sink.consumeGarbage(messageBuffer.subByteBuffer(0))
 						throw e
-					}
-					if (glen > 0) {
-						sink.consumeGarbage(messageBuffer.subByteBuffer(gpos,glen))
-						glen = 0
-						gpos = 0
 					}
 				} else {
 					if (logger?.isLoggable(Level.FINEST) == true) logger?.finest("CRC FAIL")
-					glen += syncLength
-					sink.consumeGarbage(messageBuffer.subByteBuffer(gpos,glen))
-					glen = 0
-					gpos = 0
+					sink.consumeGarbage(messageBuffer.subByteBuffer(0))
 					resetHeader()
 					val subb = ByteBuffer.allocateDirect(messageBuffer.limit()-syncLength)
 					messageBuffer.position(syncLength)
@@ -199,8 +203,6 @@ abstract class AbstractGnssDecoder<T>(
 			}
 			pp = data.position()
 		}
-		if (glen > 0) {
-			sink.consumeGarbage(data.subByteBuffer(gpos,glen))
-		}
+		flushGarbage()
 	}
 }
